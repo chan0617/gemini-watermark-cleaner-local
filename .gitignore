@@ -10,3 +10,7 @@ failed/*
 !input/.gitkeep
 !output/.gitkeep
 !failed/.gitkeep
+
+# A real crop of Gemini's watermark asset (used only as a local matching
+# template) shouldn't be published in this public repo.
+models/watermark_template.png

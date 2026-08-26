@@ -1,12 +1,13 @@
-"""Deterministic corner-region watermark detector for Gemini-generated images.
+"""Corner-region watermark detector for Gemini-generated images.
 
-Gemini places its visible sparkle watermark in the bottom-right corner at a
-fixed pixel size/margin that depends on output resolution (not a percentage
-of image size). These numbers come from public reverse-engineering of the
-watermark's alpha-blending behavior — see README "Attribution & Sources".
-Because the position is deterministic, detection only needs to (a) locate the
-best-aligned box near that expected corner and (b) score its confidence, so a
-non-watermarked or oddly-cropped image is routed to failed/ instead of being
+Gemini stamps a visible 4-point sparkle watermark near the bottom-right
+corner. Its exact pixel size/margin isn't a documented constant (an initial
+guess based on a public write-up did not match real samples), so instead of
+hardcoding one guessed position, this searches a generous proportional
+corner region at several candidate scales and picks the best-matching
+location via gradient-domain template matching. A confidence score gates
+whether a match is trusted — anything below threshold is treated as a
+detection failure, which routes the image to failed/ instead of being
 edited blindly.
 """
 from __future__ import annotations
@@ -14,18 +15,34 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw
 
-_LARGE_SIZE, _LARGE_MARGIN = 96, 64   # both dimensions > 1024px
-_SMALL_SIZE, _SMALL_MARGIN = 48, 32   # either dimension <= 1024px
+# Primary search: a tight window around the watermark's empirically measured
+# position (outer edge ~4.5% of min(width, height) in from the bottom-right
+# corner, verified across real Gemini output samples), with jitter to absorb
+# resolution/version differences. Narrow on purpose — real image content
+# (hands, furniture edges) can otherwise out-score the faint, semi-transparent
+# watermark if the search window is too wide.
+_MARGIN_FRACTION = 0.045
+_SEARCH_JITTER_FRACTION = 0.028
+_PRIMARY_ACCEPT_THRESHOLD = 0.40
 
-# How far (in px) to slide the candidate box while looking for the best
-# alignment, to absorb small margin/scaling variations between Gemini versions.
-_SEARCH_JITTER = 6
+# Fallback search: the whole bottom-right corner, used only when the primary
+# window finds nothing convincing (e.g. an unfamiliar resolution/version).
+# Held to a stricter bar since a wide search is more prone to false matches.
+_CORNER_FRACTION = 0.16
+_FALLBACK_ACCEPT_THRESHOLD = 0.55
+
+_MIN_ROI_PX = 72
+
+# Candidate watermark sizes, as a fraction of min(width, height). Measured
+# real samples put it around ~2.3-2.8% on a 2048px image; the range below
+# gives headroom for other resolutions/versions.
+_SIZE_FRACTIONS = (0.016, 0.019, 0.022, 0.025, 0.028, 0.032, 0.037, 0.043, 0.050)
 
 DEFAULT_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "models" / "watermark_template.png"
 
@@ -36,14 +53,8 @@ class Detection:
     confidence: float
 
 
-def _expected_geometry(width: int, height: int) -> Tuple[int, int]:
-    if width > 1024 and height > 1024:
-        return _LARGE_SIZE, _LARGE_MARGIN
-    return _SMALL_SIZE, _SMALL_MARGIN
-
-
 def _synthetic_sparkle(canvas: int) -> Image.Image:
-    """Fallback template: a 4-point sparkle silhouette.
+    """Astroid-curve approximation of Gemini's 4-point sparkle silhouette.
 
     Used only when the user hasn't supplied a real crop of the watermark at
     models/watermark_template.png. A real crop from the user's own image
@@ -53,23 +64,22 @@ def _synthetic_sparkle(canvas: int) -> Image.Image:
     img = Image.new("L", (canvas, canvas), 0)
     draw = ImageDraw.Draw(img)
     cx = cy = canvas / 2
-    outer, inner = canvas * 0.48, canvas * 0.14
-    points = []
-    for i in range(8):
-        r = outer if i % 2 == 0 else inner
-        angle = (math.pi / 4) * i - math.pi / 2
-        points.append((cx + r * math.cos(angle), cy + r * math.sin(angle)))
+    a = canvas * 0.46
+    points: List[Tuple[float, float]] = []
+    steps = 240
+    for i in range(steps):
+        t = 2 * math.pi * i / steps
+        x = cx + a * (math.cos(t) ** 3)
+        y = cy + a * (math.sin(t) ** 3)
+        points.append((x, y))
     draw.polygon(points, fill=255)
     return img
 
 
-def _load_template(size: int, template_path: Path) -> np.ndarray:
+def _load_template(template_path: Path) -> Image.Image:
     if template_path.exists():
-        tpl = Image.open(template_path).convert("L")
-    else:
-        tpl = _synthetic_sparkle(128)
-    tpl = tpl.resize((size, size), Image.LANCZOS)
-    return np.asarray(tpl, dtype=np.uint8)
+        return Image.open(template_path).convert("L")
+    return _synthetic_sparkle(128)
 
 
 def _gradient_magnitude(gray: np.ndarray) -> np.ndarray:
@@ -82,41 +92,72 @@ def _gradient_magnitude(gray: np.ndarray) -> np.ndarray:
     return mag.astype(np.uint8)
 
 
-def detect_watermark(
-    image: Image.Image,
-    template_path: Path = DEFAULT_TEMPLATE_PATH,
-    confidence_threshold: float = 0.28,
+def _best_match_in_roi(
+    gray_image: Image.Image,
+    template_img: Image.Image,
+    rx0: int,
+    ry0: int,
+    rx1: int,
+    ry1: int,
 ) -> Optional[Detection]:
-    """Locate the Gemini watermark using its known corner geometry.
+    rx0, ry0 = max(0, rx0), max(0, ry0)
+    rx1, ry1 = min(gray_image.width, rx1), min(gray_image.height, ry1)
+    if rx1 - rx0 < 8 or ry1 - ry0 < 8:
+        return None
 
-    Returns None if no candidate region scores above `confidence_threshold`,
-    signalling the caller to treat this image as a detection failure.
+    region = np.asarray(gray_image.crop((rx0, ry0, rx1, ry1)))
+    region_grad = _gradient_magnitude(region)
+    min_dim = min(gray_image.width, gray_image.height)
+
+    best: Optional[Detection] = None
+    for frac in _SIZE_FRACTIONS:
+        size = max(8, int(round(min_dim * frac)))
+        if size > region_grad.shape[0] or size > region_grad.shape[1]:
+            continue
+        template = np.asarray(template_img.resize((size, size), Image.LANCZOS), dtype=np.uint8)
+        template_grad = _gradient_magnitude(template)
+
+        result = cv2.matchTemplate(region_grad, template_grad, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(result)
+
+        if best is None or max_val > best.confidence:
+            x1, y1 = rx0 + max_loc[0], ry0 + max_loc[1]
+            best = Detection(box=(x1, y1, x1 + size, y1 + size), confidence=float(max_val))
+    return best
+
+
+def detect_watermark(image: Image.Image, template_path: Path = DEFAULT_TEMPLATE_PATH) -> Optional[Detection]:
+    """Locate the Gemini watermark near the bottom-right corner.
+
+    Tries a tight window around the empirically measured position first
+    (least prone to false positives from busy image content), then falls
+    back to a wider corner search under a stricter bar. Returns None if
+    neither clears its threshold, signalling a detection failure to the
+    caller.
     """
     width, height = image.size
-    size, margin = _expected_geometry(width, height)
+    gray_image = image.convert("L")
+    min_dim = min(width, height)
+    template_img = _load_template(template_path)
 
-    pad = _SEARCH_JITTER
-    sx1 = max(0, width - margin - size - pad)
-    sy1 = max(0, height - margin - size - pad)
-    sx2 = min(width, width - margin + pad)
-    sy2 = min(height, height - margin + pad)
+    jitter = int(min_dim * _SEARCH_JITTER_FRACTION)
+    anchor_x, anchor_y = width - int(min_dim * _MARGIN_FRACTION), height - int(min_dim * _MARGIN_FRACTION)
+    max_size = max(8, int(round(min_dim * _SIZE_FRACTIONS[-1])))
+    primary = _best_match_in_roi(
+        gray_image,
+        template_img,
+        anchor_x - max_size - jitter,
+        anchor_y - max_size - jitter,
+        anchor_x + jitter,
+        anchor_y + jitter,
+    )
+    if primary is not None and primary.confidence >= _PRIMARY_ACCEPT_THRESHOLD:
+        return primary
 
-    if sx2 - sx1 < size or sy2 - sy1 < size:
-        sx1, sy1 = max(0, width - size), max(0, height - size)
-        sx2, sy2 = width, height
+    roi_w = max(_MIN_ROI_PX, int(width * _CORNER_FRACTION))
+    roi_h = max(_MIN_ROI_PX, int(height * _CORNER_FRACTION))
+    fallback = _best_match_in_roi(gray_image, template_img, width - roi_w, height - roi_h, width, height)
+    if fallback is not None and fallback.confidence >= _FALLBACK_ACCEPT_THRESHOLD:
+        return fallback
 
-    region = np.asarray(image.convert("L").crop((sx1, sy1, sx2, sy2)))
-    if region.size == 0 or region.shape[0] < size or region.shape[1] < size:
-        return None
-
-    region_grad = _gradient_magnitude(region)
-    template_grad = _gradient_magnitude(_load_template(size, template_path))
-
-    result = cv2.matchTemplate(region_grad, template_grad, cv2.TM_CCOEFF_NORMED)
-    _, max_val, _, max_loc = cv2.minMaxLoc(result)
-
-    if max_val < confidence_threshold:
-        return None
-
-    x1, y1 = sx1 + max_loc[0], sy1 + max_loc[1]
-    return Detection(box=(x1, y1, x1 + size, y1 + size), confidence=float(max_val))
+    return None
