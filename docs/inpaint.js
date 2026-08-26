@@ -152,12 +152,19 @@ async function inpaintRegion(session, bitmap, destCanvas, box, maskCanvasFull) {
 
   // Feathered composite: only the masked area (plus small padding) actually
   // changes; blend its edge softly into the untouched surrounding pixels.
+  // The blur must be applied while drawing FROM a separate source canvas —
+  // drawing a canvas onto itself with a filter active is undefined
+  // behavior and was silently producing a blank/broken alpha mask, so
+  // every "successful" result quietly changed nothing.
+  const maskCropCanvas = document.createElement("canvas");
+  maskCropCanvas.width = pw; maskCropCanvas.height = ph;
+  maskCropCanvas.getContext("2d").drawImage(maskCanvasFull, px1, py1, pw, ph, 0, 0, pw, ph);
+
   const featherCanvas = document.createElement("canvas");
   featherCanvas.width = pw; featherCanvas.height = ph;
   const fctx = featherCanvas.getContext("2d");
-  fctx.drawImage(maskCanvasFull, px1, py1, pw, ph, 0, 0, pw, ph);
   fctx.filter = `blur(${FEATHER_PX}px)`;
-  fctx.drawImage(featherCanvas, 0, 0);
+  fctx.drawImage(maskCropCanvas, 0, 0);
   fctx.filter = "none";
   const alphaMask = fctx.getImageData(0, 0, pw, ph);
 
