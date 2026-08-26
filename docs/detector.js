@@ -146,10 +146,71 @@ function drawSyntheticSparkle(canvasSize) {
   return gray;
 }
 
-let _templateCache = null;
-function getBaseTemplate() {
-  if (!_templateCache) _templateCache = drawSyntheticSparkle(128);
+// A real crop of the watermark matches far better than the synthetic
+// approximation — the difference between honestly failing on a hard
+// background and confidently locking onto the wrong spot. Persisted in
+// localStorage (this browser's equivalent of a cache file) so it survives
+// page reloads, and auto-bootstrapped from the first high-confidence hit
+// so accuracy quietly improves with no user action needed.
+const TEMPLATE_STORAGE_KEY = "gwc_watermark_template_v1";
+const BOOTSTRAP_CONFIDENCE_THRESHOLD = 0.6;
+
+function loadImageFromDataUrl(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = dataUrl;
+  });
+}
+
+let _templateCache = null; // { gray: Float32Array, size: number }
+async function getBaseTemplate() {
+  if (_templateCache) return _templateCache;
+  const stored = localStorage.getItem(TEMPLATE_STORAGE_KEY);
+  if (stored) {
+    try {
+      const img = await loadImageFromDataUrl(stored);
+      const canvas = document.createElement("canvas");
+      canvas.width = img.width; canvas.height = img.height;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+      const data = ctx.getImageData(0, 0, img.width, img.height).data;
+      const gray = new Float32Array(img.width * img.height);
+      for (let i = 0; i < gray.length; i++) gray[i] = data[i * 4];
+      _templateCache = { gray, size: img.width };
+      return _templateCache;
+    } catch (e) {
+      console.warn("stored watermark template failed to load, using synthetic", e);
+    }
+  }
+  _templateCache = { gray: drawSyntheticSparkle(128), size: 128 };
   return _templateCache;
+}
+
+// Only bootstraps once — a confident-enough match is spatially accurate,
+// so the very first one seeds the cache for every image after it.
+function maybeBootstrapTemplate(imageData, box) {
+  if (localStorage.getItem(TEMPLATE_STORAGE_KEY)) return;
+  const pad = 8;
+  const [x1, y1, x2, y2] = box;
+  const cx1 = Math.max(0, x1 - pad), cy1 = Math.max(0, y1 - pad);
+  const cx2 = Math.min(imageData.width, x2 + pad), cy2 = Math.min(imageData.height, y2 + pad);
+  const w = cx2 - cx1, h = cy2 - cy1;
+  if (w <= 0 || h <= 0) return;
+
+  const full = document.createElement("canvas");
+  full.width = imageData.width; full.height = imageData.height;
+  full.getContext("2d").putImageData(imageData, 0, 0);
+  const crop = document.createElement("canvas");
+  crop.width = w; crop.height = h;
+  crop.getContext("2d").drawImage(full, cx1, cy1, w, h, 0, 0, w, h);
+  try {
+    localStorage.setItem(TEMPLATE_STORAGE_KEY, crop.toDataURL("image/png"));
+    _templateCache = null; // force reload from storage next call
+  } catch (e) {
+    console.warn("could not persist watermark template", e);
+  }
 }
 
 const _yield = () => new Promise((r) => setTimeout(r, 0));
@@ -167,12 +228,12 @@ async function bestMatchInRoiAsync(fullMag, fullW, fullH, rx0, ry0, rx1, ry1, mi
     }
   }
 
-  const baseTemplate = getBaseTemplate();
+  const { gray: baseTemplate, size: baseSize } = await getBaseTemplate();
   let best = null;
   for (const frac of SIZE_FRACTIONS) {
     const size = Math.max(8, Math.round(minDim * frac));
     if (size > rw || size > rh) continue;
-    const template = resizeGray(baseTemplate, 128, 128, size, size);
+    const template = resizeGray(baseTemplate, baseSize, baseSize, size, size);
     const match = matchTemplate(region, rw, rh, template, size, size, SEARCH_STRIDE);
     if (!best || match.score > best.confidence) {
       best = {
@@ -212,12 +273,18 @@ async function detectWatermark(imageData) {
       bestPrimary = candidate;
     }
   }
-  if (bestPrimary && bestPrimary.confidence >= PRIMARY_ACCEPT_THRESHOLD) return bestPrimary;
+  if (bestPrimary && bestPrimary.confidence >= PRIMARY_ACCEPT_THRESHOLD) {
+    if (bestPrimary.confidence >= BOOTSTRAP_CONFIDENCE_THRESHOLD) maybeBootstrapTemplate(imageData, bestPrimary.box);
+    return bestPrimary;
+  }
 
   const roiW = Math.max(MIN_ROI_PX, Math.round(width * CORNER_FRACTION));
   const roiH = Math.max(MIN_ROI_PX, Math.round(height * CORNER_FRACTION));
   const fallback = await bestMatchInRoiAsync(mag, width, height, width - roiW, height - roiH, width, height, minDim);
-  if (fallback && fallback.confidence >= FALLBACK_ACCEPT_THRESHOLD) return fallback;
+  if (fallback && fallback.confidence >= FALLBACK_ACCEPT_THRESHOLD) {
+    if (fallback.confidence >= BOOTSTRAP_CONFIDENCE_THRESHOLD) maybeBootstrapTemplate(imageData, fallback.box);
+    return fallback;
+  }
 
   return null;
 }
