@@ -13,12 +13,13 @@ const PRIMARY_ACCEPT_THRESHOLD = 0.40;
 const CORNER_FRACTION = 0.20;
 const FALLBACK_ACCEPT_THRESHOLD = 0.55;
 const MIN_ROI_PX = 72;
-// Fewer candidates than the Python version's 10, and a coarser stride —
-// naive JS template matching has no FFT/integral-image speedup here, so
-// this keeps a 2048px photo from taking tens of seconds (or hanging the
-// tab) on the largest anchor/scale combinations.
-const SIZE_FRACTIONS = [0.03, 0.045, 0.06, 0.08, 0.095];
-const SEARCH_STRIDE = 4;
+// Same candidate scales as the Python version — an earlier, more
+// aggressively trimmed version of this list (5 scales, stride 4) traded
+// away too much accuracy: it missed a watermark Python finds reliably at
+// 0.7+ confidence. Per-scale yielding (see _yield below) keeps the tab
+// responsive despite the larger search instead of cutting search quality.
+const SIZE_FRACTIONS = [0.025, 0.03, 0.035, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.095];
+const SEARCH_STRIDE = 2;
 
 function toGray(imageData) {
   const { data, width, height } = imageData;

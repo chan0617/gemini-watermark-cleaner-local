@@ -43,8 +43,15 @@ function loadSession(onProgress) {
     }
     const modelBuffer = await new Blob(chunks).arrayBuffer();
     onProgress && onProgress("모델 로딩 중...");
+    // WebGPU crashes mid-inference on this model's patched Fourier-conv ops
+    // ("[Add] .../ffc/convg2g/Add failed") — confirmed via a real user
+    // report, not just theory. That failure happens during kernel
+    // execution, after the session is already committed to WebGPU, so
+    // onnxruntime-web's own provider fallback never kicks in. wasm is what
+    // was actually verified end-to-end (via CPUExecutionProvider in
+    // Python) to produce correct output, so it's the only provider used.
     const session = await ort.InferenceSession.create(modelBuffer, {
-      executionProviders: ["webgpu", "wasm"],
+      executionProviders: ["wasm"],
     });
     onProgress && onProgress("준비 완료");
     return session;
