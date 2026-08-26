@@ -98,9 +98,10 @@ async function processOne(item) {
     srcCanvas.getContext("2d").drawImage(bitmap, 0, 0);
     const imageData = srcCanvas.getContext("2d").getImageData(0, 0, bitmap.width, bitmap.height);
 
-    const detection = detectWatermark(imageData);
+    const detection = await detectWatermark(imageData);
     if (!detection) {
       item.status = "failed";
+      item.error = "워터마크를 찾지 못함 (자동 탐지 실패 — \"직접선택\"으로 수동 처리 가능)";
       render();
       return;
     }
@@ -116,9 +117,11 @@ async function processOne(item) {
     item.resultCanvas = destCanvas;
     item.confidence = detection.confidence;
     item.status = "done";
+    item.error = null;
   } catch (err) {
     console.error(err);
     item.status = "failed";
+    item.error = `오류: ${err.message || err}`;
   }
   render();
 }
@@ -222,8 +225,16 @@ function renderList(folder, list) {
 
     const name = document.createElement("div");
     name.className = "name";
-    name.textContent = item.status === "processing" ? `${item.name} (처리 중...)` : item.name;
-    name.title = item.name;
+    if (item.status === "processing") {
+      name.textContent = `${item.name} (처리 중...)`;
+      name.title = item.name;
+    } else if (item.status === "failed" && item.error) {
+      name.textContent = `${item.name} — ${item.error}`;
+      name.title = item.error;
+    } else {
+      name.textContent = item.name;
+      name.title = item.name;
+    }
     div.appendChild(name);
 
     if (folder !== "output") {

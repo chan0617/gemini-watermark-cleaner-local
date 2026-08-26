@@ -13,8 +13,12 @@ const PRIMARY_ACCEPT_THRESHOLD = 0.40;
 const CORNER_FRACTION = 0.20;
 const FALLBACK_ACCEPT_THRESHOLD = 0.55;
 const MIN_ROI_PX = 72;
-const SIZE_FRACTIONS = [0.025, 0.03, 0.035, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.095];
-const SEARCH_STRIDE = 2; // coarser sliding step keeps this fast in plain JS
+// Fewer candidates than the Python version's 10, and a coarser stride —
+// naive JS template matching has no FFT/integral-image speedup here, so
+// this keeps a 2048px photo from taking tens of seconds (or hanging the
+// tab) on the largest anchor/scale combinations.
+const SIZE_FRACTIONS = [0.03, 0.045, 0.06, 0.08, 0.095];
+const SEARCH_STRIDE = 4;
 
 function toGray(imageData) {
   const { data, width, height } = imageData;
@@ -148,7 +152,9 @@ function getBaseTemplate() {
   return _templateCache;
 }
 
-function bestMatchInRoi(fullMag, fullW, fullH, rx0, ry0, rx1, ry1, minDim) {
+const _yield = () => new Promise((r) => setTimeout(r, 0));
+
+async function bestMatchInRoiAsync(fullMag, fullW, fullH, rx0, ry0, rx1, ry1, minDim) {
   rx0 = Math.max(0, rx0); ry0 = Math.max(0, ry0);
   rx1 = Math.min(fullW, rx1); ry1 = Math.min(fullH, ry1);
   const rw = rx1 - rx0, rh = ry1 - ry0;
@@ -174,14 +180,18 @@ function bestMatchInRoi(fullMag, fullW, fullH, rx0, ry0, rx1, ry1, minDim) {
         confidence: match.score,
       };
     }
+    await _yield(); // keep the tab responsive on large photos
   }
   return best;
 }
 
 /**
  * Detect the Gemini watermark in an ImageData. Returns {box:[x1,y1,x2,y2], confidence} or null.
+ * Async so it periodically yields to the browser instead of freezing the tab
+ * on large photos — this is plain JS template matching with no FFT/SIMD
+ * speedup, so a 2048px image is genuinely a few hundred million operations.
  */
-function detectWatermark(imageData) {
+async function detectWatermark(imageData) {
   const width = imageData.width, height = imageData.height;
   const { mag } = gradientMagnitudeFromImageData(imageData);
   const minDim = Math.min(width, height);
@@ -192,7 +202,7 @@ function detectWatermark(imageData) {
     const jitter = Math.round(minDim * jitterFrac);
     const anchorX = width - Math.round(minDim * margin);
     const anchorY = height - Math.round(minDim * margin);
-    const candidate = bestMatchInRoi(
+    const candidate = await bestMatchInRoiAsync(
       mag, width, height,
       anchorX - maxSize - jitter, anchorY - maxSize - jitter,
       anchorX + jitter, anchorY + jitter,
@@ -206,7 +216,7 @@ function detectWatermark(imageData) {
 
   const roiW = Math.max(MIN_ROI_PX, Math.round(width * CORNER_FRACTION));
   const roiH = Math.max(MIN_ROI_PX, Math.round(height * CORNER_FRACTION));
-  const fallback = bestMatchInRoi(mag, width, height, width - roiW, height - roiH, width, height, minDim);
+  const fallback = await bestMatchInRoiAsync(mag, width, height, width - roiW, height - roiH, width, height, minDim);
   if (fallback && fallback.confidence >= FALLBACK_ACCEPT_THRESHOLD) return fallback;
 
   return null;
