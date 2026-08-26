@@ -23,6 +23,26 @@ Gemini로 생성된 이미지에 표시되는 눈에 보이는 워터마크(스�
 최초 실행 시 `start.command`가 가상환경(`.venv`)을 만들고 `requirements.txt`를
 설치합니다. 이후 실행부터는 설치 과정 없이 바로 처리가 시작됩니다.
 
+### 웹 UI (브라우저에서 업로드/삭제)
+
+폴더를 직접 건드리지 않고 브라우저에서 이미지를 올리고 지우고 싶다면:
+
+```
+./start_web.command
+```
+
+또는 `./start.command --web`. 실행하면 `http://127.0.0.1:8765`가 자동으로
+브라우저에서 열립니다. 이 서버는 **127.0.0.1(내 컴퓨터)에서만** 열리며
+외부에서 접근할 수 없습니다.
+
+- 드래그 앤 드롭 또는 클릭으로 이미지를 올리면 `input/`에 저장됩니다.
+- "지금 정리하기" 버튼을 누르면 그 시점의 `input/`을 한 번 처리합니다.
+- 대기중(input) / 완료(output) / 실패(failed) 세 목록에서 파일을 바로
+  삭제(×)하거나 완료된 결과를 다운로드할 수 있습니다.
+- 이 웹 UI는 폴더 기반 파이프라인(`src/pipeline.py`) 위에 얹은 선택적
+  편의 기능일 뿐이며, 웹 UI 없이 `start.command`/`--watch`만으로도
+  동일하게 동작합니다.
+
 ### Watch Mode (자동 감시)
 
 ```
@@ -54,8 +74,10 @@ gemini-watermark-cleaner-local/
 ├── failed/     # 탐지/복원 실패 시 원본 복사본
 ├── models/     # (선택) watermark_template.png — 직접 채취한 워터마크 크롭
 ├── src/        # 탐지·복원·상태관리 파이프라인 코드
-├── main.py     # CLI 진입점
+├── main.py     # CLI 진입점 (--watch, --web)
+├── webui.py    # 선택적 로컬 웹 UI (업로드/삭제, 127.0.0.1 전용)
 ├── start.command
+├── start_web.command  # 웹 UI 더블클릭 실행
 └── requirements.txt
 ```
 
