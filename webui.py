@@ -85,8 +85,8 @@ def serve_file(folder: str, filename: str):
 def api_download_all():
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for name in _list_folder(OUTPUT_DIR):
-            zf.write(OUTPUT_DIR / name, arcname=name)
+        for entry in _list_folder(OUTPUT_DIR):
+            zf.write(OUTPUT_DIR / entry["name"], arcname=entry["name"])
     buf.seek(0)
     return send_file(buf, mimetype="application/zip", as_attachment=True, download_name="cleaned_images.zip")
 
