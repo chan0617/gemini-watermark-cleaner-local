@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.state/
+.DS_Store
+
+input/*
+output/*
+failed/*
+!input/.gitkeep
+!output/.gitkeep
+!failed/.gitkeep
