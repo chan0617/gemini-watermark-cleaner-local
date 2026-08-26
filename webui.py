@@ -199,8 +199,10 @@ def api_manual_process():
     state = ProcessedState(STATE_PATH)
     state.mark(src_path.name, utils.file_hash(src_path), "success")
 
+    # The failed/ copy is a review duplicate, not the protected original in
+    # input/ — once resolved (from either folder) it's just clutter.
     stale = FAILED_DIR / src_path.name
-    if stale.exists() and stale != src_path:
+    if stale.exists():
         stale.unlink()
 
     return jsonify({"saved": dest.name})
