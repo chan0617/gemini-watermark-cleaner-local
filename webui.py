@@ -40,26 +40,33 @@ def _safe_path(folder: str, filename: str) -> Path:
     return path
 
 
-def _list_folder(folder: Path) -> List[str]:
+def _list_folder(folder: Path) -> List[dict]:
     if not folder.exists():
         return []
-    return sorted(p.name for p in folder.iterdir() if p.is_file() and not p.name.startswith("."))
+    entries = [p for p in folder.iterdir() if p.is_file() and not p.name.startswith(".")]
+    entries.sort(key=lambda p: p.name)
+    return [{"name": p.name, "mtime": p.stat().st_mtime} for p in entries]
 
 
 @app.get("/")
 def index():
-    return _PAGE
+    resp = app.make_response(_PAGE)
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
 
 
 @app.get("/api/files")
 def api_files():
-    return jsonify(
+    resp = jsonify(
         {
             "input": _list_folder(INPUT_DIR),
             "output": _list_folder(OUTPUT_DIR),
             "failed": _list_folder(FAILED_DIR),
         }
     )
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.get("/files/<folder>/<path:filename>")
@@ -319,7 +326,7 @@ processBtn.addEventListener('click', async () => {
     const res = await fetch('/api/process', { method: 'POST' });
     const s = await res.json();
     statusText.textContent = `총 ${s.total}장 · 성공 ${s.success}장 · 실패 ${s.failed}장` +
-      (s.skipped ? ` · 건너뜀 ${s.skipped}장` : '');
+      (s.skipped ? ` · 이미 처리되어 건너뜀 ${s.skipped}장` : '');
   } finally {
     processBtn.disabled = false;
     refresh();
@@ -330,32 +337,53 @@ downloadAllBtn.addEventListener('click', () => {
   window.location.href = '/api/download_all';
 });
 
-async function deleteFile(folder, filename) {
-  await fetch('/api/delete', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ folder, filename }),
-  });
+async function deleteFile(folder, filename, itemEl) {
+  // Remove from view immediately — don't wait on the network round-trip to
+  // confirm something that's already decided, and don't let a missed poll
+  // tick make a deleted file look like it's still there.
+  if (itemEl) { itemEl.style.opacity = '0.3'; itemEl.style.pointerEvents = 'none'; }
+  try {
+    const res = await fetch('/api/delete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folder, filename }),
+    });
+    if (!res.ok) throw new Error('delete failed');
+    if (itemEl) itemEl.remove();
+  } catch (e) {
+    statusText.textContent = `삭제 실패: ${filename}`;
+    if (itemEl) { itemEl.style.opacity = '1'; itemEl.style.pointerEvents = 'auto'; }
+  }
+  updateCount(folder);
   refresh();
+}
+
+function updateCount(folder) {
+  const el = document.getElementById(`list-${folder}`);
+  document.getElementById(`count-${folder}`).textContent = el.querySelectorAll('.item').length;
 }
 
 function renderList(folder, files) {
   const el = document.getElementById(`list-${folder}`);
   document.getElementById(`count-${folder}`).textContent = files.length;
   if (!files.length) { el.innerHTML = '<div class="empty">비어 있음</div>'; return; }
-  el.innerHTML = files.map(name => `
+  el.innerHTML = files.map(f => {
+    const name = f.name;
+    const escaped = name.replace(/'/g, "\\'");
+    const src = `/files/${folder}/${encodeURIComponent(name)}?v=${f.mtime}`;
+    return `
     <div class="item">
-      <img src="/files/${folder}/${encodeURIComponent(name)}" loading="lazy"
-           onclick="openManualEditor('${folder}', '${name.replace(/'/g, "\\'")}')">
+      <img src="${src}" loading="lazy" onclick="openManualEditor('${folder}', '${escaped}')">
       <div class="name" title="${name}">${name}</div>
-      ${folder !== 'output' ? `<button class="link" onclick="openManualEditor('${folder}', '${name.replace(/'/g, "\\'")}')">직접선택</button>` : ''}
-      ${folder === 'output' ? `<a class="dl" href="/files/${folder}/${encodeURIComponent(name)}" download>저장</a>` : ''}
-      <button class="del" title="삭제" onclick="deleteFile('${folder}', '${name.replace(/'/g, "\\'")}')">×</button>
+      ${folder !== 'output' ? `<button class="link" onclick="openManualEditor('${folder}', '${escaped}')">직접선택</button>` : ''}
+      ${folder === 'output' ? `<a class="dl" href="${src}" download>저장</a>` : ''}
+      <button class="del" title="삭제" onclick="deleteFile('${folder}', '${escaped}', this.closest('.item'))">×</button>
     </div>
-  `).join('');
+  `;
+  }).join('');
 }
 
 async function refresh() {
-  const res = await fetch('/api/files');
+  const res = await fetch('/api/files', { cache: 'no-store' });
   const data = await res.json();
   renderList('input', data.input);
   renderList('output', data.output);
