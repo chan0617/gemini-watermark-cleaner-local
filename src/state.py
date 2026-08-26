@@ -30,6 +30,11 @@ class ProcessedState:
         self._data[key] = {"hash": content_hash, "status": status}
         self._save()
 
+    def forget(self, key: str) -> None:
+        if key in self._data:
+            del self._data[key]
+            self._save()
+
     def _save(self) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         self.state_path.write_text(json.dumps(self._data, indent=2, ensure_ascii=False))

@@ -8,6 +8,7 @@ and start.command even if this page is never opened.
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import zipfile
 from pathlib import Path
@@ -100,25 +101,53 @@ def api_upload():
         ext = Path(name).suffix.lower()
         if not name or ext not in utils.SUPPORTED_EXTENSIONS:
             continue
+
+        content = f.read()
         dest = INPUT_DIR / name
-        counter = 1
-        while dest.exists():
-            dest = INPUT_DIR / f"{Path(name).stem}_{counter}{ext}"
-            counter += 1
-        f.save(dest)
+        if dest.exists():
+            existing_hash = utils.file_hash(dest)
+            new_hash = hashlib.sha1(content).hexdigest()
+            if existing_hash == new_hash:
+                saved.append(dest.name)  # identical file already present — don't duplicate
+                continue
+            counter = 1
+            while dest.exists():
+                dest = INPUT_DIR / f"{Path(name).stem}_{counter}{ext}"
+                counter += 1
+        dest.write_bytes(content)
         saved.append(dest.name)
     return jsonify({"saved": saved})
+
+
+def _original_name_for(folder: str, filename: str) -> str:
+    """Map a failed/output filename back to the original input filename used
+    as the state-tracking key (pipeline.py always keys by the input name)."""
+    if folder == "failed":
+        return filename
+    if folder == "output":
+        p = Path(filename)
+        stem = p.stem[: -len("_clean")] if p.stem.endswith("_clean") else p.stem
+        return f"{stem}{p.suffix}"
+    return filename
 
 
 @app.post("/api/delete")
 def api_delete():
     data = request.get_json(force=True, silent=True) or {}
+    folder = data.get("folder", "")
+    filename = data.get("filename", "")
     try:
-        path = _safe_path(data.get("folder", ""), data.get("filename", ""))
+        path = _safe_path(folder, filename)
     except ValueError:
         return jsonify({"error": "invalid path"}), 400
     if path.exists():
         path.unlink()
+        # Forget this file's "already processed" record too — otherwise
+        # deleting a result (or a failed copy) and reprocessing later just
+        # gets silently skipped as "already done" even though the output
+        # no longer exists.
+        state = ProcessedState(STATE_PATH)
+        state.forget(_original_name_for(folder, filename))
         return jsonify({"deleted": True})
     return jsonify({"deleted": False}), 404
 
