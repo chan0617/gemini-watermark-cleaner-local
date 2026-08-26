@@ -64,8 +64,15 @@
 
   <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/jszip/dist/jszip.min.js"></script>
-  <script src="detector.js"></script>
-  <script src="inpaint.js"></script>
-  <script src="app.js"></script>
+  <!--
+    GitHub Pages doesn't send strong no-cache headers on these files, so a
+    browser can keep serving a stale cached copy after a redeploy even past
+    a hard refresh. Bump this version string on every deploy that touches
+    detector.js/inpaint.js/app.js so the URL itself changes and the browser
+    is forced to fetch fresh code.
+  -->
+  <script src="detector.js?v=3"></script>
+  <script src="inpaint.js?v=3"></script>
+  <script src="app.js?v=3"></script>
 </body>
 </html>
