@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gemini Watermark Cleaner (Browser)</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <h1>Gemini Watermark Cleaner</h1>
+  <div class="sub">
+    브라우저 안에서만 처리됩니다 — 이미지가 어디로도 업로드되지 않습니다.
+    <span id="modelStatus">모델 준비 중...</span>
+  </div>
+
+  <div class="dropzone" id="dropzone">
+    이미지를 여기로 드래그하거나 클릭해서 선택하세요 (PNG / JPG / JPEG / WEBP)
+    <input type="file" id="fileInput" multiple accept=".png,.jpg,.jpeg,.webp" style="display:none">
+  </div>
+
+  <div class="actions">
+    <button class="primary" id="processBtn">워터마크 지우기</button>
+    <button class="secondary" id="downloadAllBtn">전체 다운로드 (zip)</button>
+    <span class="status" id="statusText"></span>
+  </div>
+
+  <div class="columns">
+    <div class="col">
+      <h2>대기중 <span class="count" id="count-input">0</span></h2>
+      <div id="list-input"></div>
+    </div>
+    <div class="col">
+      <h2>완료 <span class="count" id="count-output">0</span></h2>
+      <div id="list-output"></div>
+    </div>
+    <div class="col">
+      <h2>실패 <span class="count" id="count-failed">0</span></h2>
+      <div id="list-failed"></div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="modalOverlay">
+    <div class="modal">
+      <h3>직접 선택으로 지우기</h3>
+      <p class="hint">지우고 싶은 부분을 브러시(고정 크기)로 문질러 칠한 뒤 "지우기 실행"을 누르세요.</p>
+      <div class="canvas-wrap" id="canvasWrap">
+        <img class="sizer" id="modalImg">
+        <canvas id="baseCanvas"></canvas>
+        <canvas id="maskCanvas"></canvas>
+      </div>
+      <div class="modal-actions">
+        <button class="secondary" id="clearMaskBtn">초기화</button>
+        <button class="secondary" id="cancelModalBtn">취소</button>
+        <button class="primary" id="applyMaskBtn">지우기 실행</button>
+      </div>
+    </div>
+  </div>
+
+  <p class="footer">
+    모델: <a href="https://huggingface.co/Carve/LaMa-ONNX" target="_blank">Carve/LaMa-ONNX</a>
+    (Apache-2.0, <a href="https://github.com/advimman/lama" target="_blank">advimman/lama</a> 기반) ·
+    코드: <a href="https://github.com/chan0617/gemini-watermark-cleaner-local" target="_blank">GitHub</a>
+  </p>
+
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip/dist/jszip.min.js"></script>
+  <script src="detector.js"></script>
+  <script src="inpaint.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
