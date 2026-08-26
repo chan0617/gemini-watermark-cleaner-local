@@ -50,7 +50,33 @@ _MIN_ROI_PX = 72
 # larger matches by finding noise that happens to correlate well.
 _SIZE_FRACTIONS = (0.025, 0.03, 0.035, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.095)
 
-DEFAULT_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "models" / "watermark_template.png"
+# A real crop of the watermark matches far better than the synthetic
+# fallback shape (it's the difference between honestly failing on a hard
+# background and confidently locking onto the wrong spot). This lives
+# outside the repo/venv so it survives a git re-clone or venv rebuild —
+# models/watermark_template.png (repo-local, gitignored since it's a crop
+# of Google's logo) is still checked first for anyone who sets one up by
+# hand, then this persistent cache, then the synthetic shape.
+PERSISTENT_TEMPLATE_PATH = Path.home() / ".cache" / "gemini-watermark-cleaner" / "watermark_template.png"
+REPO_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "models" / "watermark_template.png"
+
+# A detection this confident is almost certainly correct, so once we see
+# one we bootstrap the persistent template from it — the very first
+# high-confidence success in a session quietly sharpens accuracy for every
+# image after it, with no user action required.
+_BOOTSTRAP_CONFIDENCE_THRESHOLD = 0.6
+
+
+def save_persistent_template(image: Image.Image, box: Tuple[int, int, int, int], padding: int = 8) -> None:
+    if PERSISTENT_TEMPLATE_PATH.exists():
+        return
+    width, height = image.size
+    x1, y1, x2, y2 = box
+    x1, y1 = max(0, x1 - padding), max(0, y1 - padding)
+    x2, y2 = min(width, x2 + padding), min(height, y2 + padding)
+    crop = image.convert("L").crop((x1, y1, x2, y2))
+    PERSISTENT_TEMPLATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    crop.save(PERSISTENT_TEMPLATE_PATH)
 
 
 @dataclass
@@ -82,9 +108,10 @@ def _synthetic_sparkle(canvas: int) -> Image.Image:
     return img
 
 
-def _load_template(template_path: Path) -> Image.Image:
-    if template_path.exists():
-        return Image.open(template_path).convert("L")
+def _load_template(template_path: Optional[Path]) -> Image.Image:
+    for candidate in (template_path, REPO_TEMPLATE_PATH, PERSISTENT_TEMPLATE_PATH):
+        if candidate is not None and candidate.exists():
+            return Image.open(candidate).convert("L")
     return _synthetic_sparkle(128)
 
 
@@ -132,7 +159,7 @@ def _best_match_in_roi(
     return best
 
 
-def detect_watermark(image: Image.Image, template_path: Path = DEFAULT_TEMPLATE_PATH) -> Optional[Detection]:
+def detect_watermark(image: Image.Image, template_path: Optional[Path] = None) -> Optional[Detection]:
     """Locate the Gemini watermark near the bottom-right corner.
 
     Tries tight windows around each empirically measured anchor position
@@ -140,6 +167,10 @@ def detect_watermark(image: Image.Image, template_path: Path = DEFAULT_TEMPLATE_
     falls back to a wider corner search under a stricter bar. Returns None
     if nothing clears its threshold, signalling a detection failure to the
     caller.
+
+    A sufficiently confident hit is used to bootstrap the persistent
+    template cache (see save_persistent_template) if one doesn't exist yet,
+    so detection quietly gets sharper after the first clean success.
     """
     width, height = image.size
     gray_image = image.convert("L")
@@ -164,12 +195,16 @@ def detect_watermark(image: Image.Image, template_path: Path = DEFAULT_TEMPLATE_
             best_primary = candidate
 
     if best_primary is not None and best_primary.confidence >= _PRIMARY_ACCEPT_THRESHOLD:
+        if best_primary.confidence >= _BOOTSTRAP_CONFIDENCE_THRESHOLD:
+            save_persistent_template(image, best_primary.box)
         return best_primary
 
     roi_w = max(_MIN_ROI_PX, int(width * _CORNER_FRACTION))
     roi_h = max(_MIN_ROI_PX, int(height * _CORNER_FRACTION))
     fallback = _best_match_in_roi(gray_image, template_img, width - roi_w, height - roi_h, width, height)
     if fallback is not None and fallback.confidence >= _FALLBACK_ACCEPT_THRESHOLD:
+        if fallback.confidence >= _BOOTSTRAP_CONFIDENCE_THRESHOLD:
+            save_persistent_template(image, fallback.box)
         return fallback
 
     return None
