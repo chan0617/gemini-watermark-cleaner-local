@@ -21,28 +21,34 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw
 
-# Primary search: a tight window around the watermark's empirically measured
-# position (outer edge ~4.5% of min(width, height) in from the bottom-right
-# corner, verified across real Gemini output samples), with jitter to absorb
-# resolution/version differences. Narrow on purpose — real image content
-# (hands, furniture edges) can otherwise out-score the faint, semi-transparent
-# watermark if the search window is too wide.
-_MARGIN_FRACTION = 0.045
-_SEARCH_JITTER_FRACTION = 0.028
+# Primary search: tight windows around the watermark's empirically measured
+# positions, with jitter to absorb resolution/version differences. Narrow on
+# purpose — real image content (hands, furniture edges) can otherwise
+# out-score the faint, semi-transparent watermark if the search window is
+# too wide. The watermark is NOT a fixed fraction of canvas size: measured
+# samples show ~5.8% inset / ~2.8% size on a 2048px image but ~9.5% inset /
+# ~7.7% size on a 1024px image (smaller canvases get a relatively bigger,
+# more-inset mark so it stays legible) — so two anchors are tried, not one.
+_ANCHORS = (
+    (0.045, 0.028),  # margin_fraction, jitter_fraction — ~2048px-class placement
+    (0.095, 0.035),  # margin_fraction, jitter_fraction — ~1024px-class placement
+)
 _PRIMARY_ACCEPT_THRESHOLD = 0.40
 
-# Fallback search: the whole bottom-right corner, used only when the primary
-# window finds nothing convincing (e.g. an unfamiliar resolution/version).
+# Fallback search: the whole bottom-right corner, used only when no primary
+# window finds anything convincing (e.g. an unfamiliar resolution/version).
 # Held to a stricter bar since a wide search is more prone to false matches.
-_CORNER_FRACTION = 0.16
+_CORNER_FRACTION = 0.20
 _FALLBACK_ACCEPT_THRESHOLD = 0.55
 
 _MIN_ROI_PX = 72
 
-# Candidate watermark sizes, as a fraction of min(width, height). Measured
-# real samples put it around ~2.3-2.8% on a 2048px image; the range below
-# gives headroom for other resolutions/versions.
-_SIZE_FRACTIONS = (0.016, 0.019, 0.022, 0.025, 0.028, 0.032, 0.037, 0.043, 0.050)
+# Candidate watermark sizes, as a fraction of min(width, height), covering
+# both the ~2.3-3.2% (2048px-class) and ~7-9% (1024px-class) cases measured.
+# Deliberately excludes very small fractions (<2.5%): real measurements never
+# showed anything that small, and tiny windows spuriously out-score correct
+# larger matches by finding noise that happens to correlate well.
+_SIZE_FRACTIONS = (0.025, 0.03, 0.035, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.095)
 
 DEFAULT_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "models" / "watermark_template.png"
 
@@ -129,30 +135,36 @@ def _best_match_in_roi(
 def detect_watermark(image: Image.Image, template_path: Path = DEFAULT_TEMPLATE_PATH) -> Optional[Detection]:
     """Locate the Gemini watermark near the bottom-right corner.
 
-    Tries a tight window around the empirically measured position first
-    (least prone to false positives from busy image content), then falls
-    back to a wider corner search under a stricter bar. Returns None if
-    neither clears its threshold, signalling a detection failure to the
+    Tries tight windows around each empirically measured anchor position
+    first (least prone to false positives from busy image content), then
+    falls back to a wider corner search under a stricter bar. Returns None
+    if nothing clears its threshold, signalling a detection failure to the
     caller.
     """
     width, height = image.size
     gray_image = image.convert("L")
     min_dim = min(width, height)
     template_img = _load_template(template_path)
-
-    jitter = int(min_dim * _SEARCH_JITTER_FRACTION)
-    anchor_x, anchor_y = width - int(min_dim * _MARGIN_FRACTION), height - int(min_dim * _MARGIN_FRACTION)
     max_size = max(8, int(round(min_dim * _SIZE_FRACTIONS[-1])))
-    primary = _best_match_in_roi(
-        gray_image,
-        template_img,
-        anchor_x - max_size - jitter,
-        anchor_y - max_size - jitter,
-        anchor_x + jitter,
-        anchor_y + jitter,
-    )
-    if primary is not None and primary.confidence >= _PRIMARY_ACCEPT_THRESHOLD:
-        return primary
+
+    best_primary: Optional[Detection] = None
+    for margin_fraction, jitter_fraction in _ANCHORS:
+        jitter = int(min_dim * jitter_fraction)
+        anchor_x = width - int(min_dim * margin_fraction)
+        anchor_y = height - int(min_dim * margin_fraction)
+        candidate = _best_match_in_roi(
+            gray_image,
+            template_img,
+            anchor_x - max_size - jitter,
+            anchor_y - max_size - jitter,
+            anchor_x + jitter,
+            anchor_y + jitter,
+        )
+        if candidate is not None and (best_primary is None or candidate.confidence > best_primary.confidence):
+            best_primary = candidate
+
+    if best_primary is not None and best_primary.confidence >= _PRIMARY_ACCEPT_THRESHOLD:
+        return best_primary
 
     roi_w = max(_MIN_ROI_PX, int(width * _CORNER_FRACTION))
     roi_h = max(_MIN_ROI_PX, int(height * _CORNER_FRACTION))

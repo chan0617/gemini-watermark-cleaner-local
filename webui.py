@@ -7,14 +7,20 @@ and start.command even if this page is never opened.
 """
 from __future__ import annotations
 
+import base64
+import io
+import zipfile
 from pathlib import Path
 from typing import List
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_file, send_from_directory
+from PIL import Image
 from werkzeug.utils import secure_filename
 
 from src import utils
-from src.pipeline import FAILED_DIR, INPUT_DIR, OUTPUT_DIR, run_once
+from src.inpainter import inpaint
+from src.pipeline import FAILED_DIR, INPUT_DIR, OUTPUT_DIR, STATE_PATH, run_once
+from src.state import ProcessedState
 
 app = Flask(__name__)
 
@@ -67,6 +73,16 @@ def serve_file(folder: str, filename: str):
     return send_from_directory(_FOLDERS[folder], path.name)
 
 
+@app.get("/api/download_all")
+def api_download_all():
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name in _list_folder(OUTPUT_DIR):
+            zf.write(OUTPUT_DIR / name, arcname=name)
+    buf.seek(0)
+    return send_file(buf, mimetype="application/zip", as_attachment=True, download_name="cleaned_images.zip")
+
+
 @app.post("/api/upload")
 def api_upload():
     saved = []
@@ -113,6 +129,47 @@ def api_process():
     )
 
 
+@app.post("/api/manual_process")
+def api_manual_process():
+    """Inpaint a user-brushed mask directly, bypassing auto-detection."""
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        src_path = _safe_path(data.get("folder", "input"), data.get("filename", ""))
+    except ValueError:
+        return jsonify({"error": "invalid path"}), 400
+    if not src_path.exists():
+        return jsonify({"error": "not found"}), 404
+
+    mask_data_url = data.get("mask", "")
+    try:
+        _, b64data = mask_data_url.split(",", 1)
+        mask_bytes = base64.b64decode(b64data)
+        mask_img = Image.open(io.BytesIO(mask_bytes)).convert("L")
+    except Exception:
+        return jsonify({"error": "invalid mask"}), 400
+
+    image = utils.load_image(src_path)
+    mask_img = mask_img.resize(image.size, Image.NEAREST).point(lambda p: 255 if p > 20 else 0)
+    if not mask_img.getbbox():
+        return jsonify({"error": "empty mask"}), 400
+
+    try:
+        result = inpaint(image, mask_img)
+        dest = OUTPUT_DIR / f"{src_path.stem}_clean{src_path.suffix.lower()}"
+        utils.save_result(result, dest, src_path)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    state = ProcessedState(STATE_PATH)
+    state.mark(src_path.name, utils.file_hash(src_path), "success")
+
+    stale = FAILED_DIR / src_path.name
+    if stale.exists() and stale != src_path:
+        stale.unlink()
+
+    return jsonify({"saved": dest.name})
+
+
 _PAGE = """<!doctype html>
 <html lang="ko">
 <head>
@@ -134,28 +191,50 @@ _PAGE = """<!doctype html>
     margin-bottom: 14px;
   }
   .dropzone.drag { border-color: #0071e3; background: #eef6ff; }
-  .actions { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; }
+  .actions { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; flex-wrap: wrap; }
   button.primary {
     background: #0071e3; color: #fff; border: none; border-radius: 8px; padding: 10px 18px;
     font-size: 14px; cursor: pointer;
   }
-  button.primary:disabled { background: #a9a9ac; cursor: default; }
+  button.secondary {
+    background: #fff; color: #0071e3; border: 1px solid #0071e3; border-radius: 8px; padding: 9px 16px;
+    font-size: 14px; cursor: pointer;
+  }
+  button.primary:disabled, button.secondary:disabled { opacity: 0.5; cursor: default; }
   .status { font-size: 13px; color: #6e6e73; }
   .columns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
   .col { background: #fff; border-radius: 12px; padding: 14px; min-height: 200px; }
   .col h2 { font-size: 14px; margin: 0 0 10px; display: flex; justify-content: space-between; }
   .col h2 span.count { color: #6e6e73; font-weight: normal; }
   .item {
-    display: flex; align-items: center; gap: 8px; padding: 6px; border-radius: 8px;
+    display: flex; align-items: center; gap: 6px; padding: 6px; border-radius: 8px;
   }
   .item:hover { background: #f5f5f7; }
-  .item img { width: 40px; height: 40px; object-fit: cover; border-radius: 6px; background: #eee; }
+  .item img { width: 40px; height: 40px; object-fit: cover; border-radius: 6px; background: #eee; cursor: pointer; }
   .item .name { flex: 1; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .item a.dl { font-size: 12px; color: #0071e3; text-decoration: none; margin-right: 4px; }
+  .item a.dl, .item button.link {
+    font-size: 12px; color: #0071e3; text-decoration: none; margin-right: 2px; background: none; border: none; cursor: pointer; padding: 0;
+  }
   .item button.del {
     border: none; background: transparent; color: #ff3b30; font-size: 16px; cursor: pointer; line-height: 1;
   }
   .empty { color: #b0b0b5; font-size: 12.5px; padding: 6px; }
+
+  .modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+    align-items: center; justify-content: center; z-index: 1000;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: #fff; border-radius: 14px; padding: 18px; max-width: 92vw; max-height: 92vh;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .modal h3 { margin: 0; font-size: 15px; }
+  .modal .hint { font-size: 12.5px; color: #6e6e73; margin: 0; }
+  .canvas-wrap { position: relative; line-height: 0; cursor: crosshair; }
+  .canvas-wrap canvas { position: absolute; top: 0; left: 0; max-width: 100%; }
+  .canvas-wrap .sizer { visibility: hidden; display: block; }
+  .modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
 </style>
 </head>
 <body>
@@ -168,7 +247,8 @@ _PAGE = """<!doctype html>
   </div>
 
   <div class="actions">
-    <button class="primary" id="processBtn">지금 정리하기</button>
+    <button class="primary" id="processBtn">워터마크 지우기</button>
+    <button class="secondary" id="downloadAllBtn">전체 다운로드 (zip)</button>
     <span class="status" id="statusText"></span>
   </div>
 
@@ -187,10 +267,28 @@ _PAGE = """<!doctype html>
     </div>
   </div>
 
+  <div class="modal-overlay" id="modalOverlay">
+    <div class="modal">
+      <h3 id="modalTitle">직접 선택으로 지우기</h3>
+      <p class="hint">지우고 싶은 부분을 브러시(고정 크기)로 문질러 칠한 뒤 "지우기 실행"을 누르세요.</p>
+      <div class="canvas-wrap" id="canvasWrap">
+        <img class="sizer" id="modalImg">
+        <canvas id="baseCanvas"></canvas>
+        <canvas id="maskCanvas"></canvas>
+      </div>
+      <div class="modal-actions">
+        <button class="secondary" id="clearMaskBtn">초기화</button>
+        <button class="secondary" id="cancelModalBtn">취소</button>
+        <button class="primary" id="applyMaskBtn">지우기 실행</button>
+      </div>
+    </div>
+  </div>
+
 <script>
 const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('fileInput');
 const processBtn = document.getElementById('processBtn');
+const downloadAllBtn = document.getElementById('downloadAllBtn');
 const statusText = document.getElementById('statusText');
 
 dropzone.addEventListener('click', () => fileInput.click());
@@ -216,7 +314,7 @@ async function uploadFiles(files) {
 
 processBtn.addEventListener('click', async () => {
   processBtn.disabled = true;
-  statusText.textContent = '처리 중... (이미지 수에 따라 시간이 걸릴 수 있습니다)';
+  statusText.textContent = '워터마크 지우는 중... (이미지 수에 따라 시간이 걸릴 수 있습니다)';
   try {
     const res = await fetch('/api/process', { method: 'POST' });
     const s = await res.json();
@@ -226,6 +324,10 @@ processBtn.addEventListener('click', async () => {
     processBtn.disabled = false;
     refresh();
   }
+});
+
+downloadAllBtn.addEventListener('click', () => {
+  window.location.href = '/api/download_all';
 });
 
 async function deleteFile(folder, filename) {
@@ -242,8 +344,10 @@ function renderList(folder, files) {
   if (!files.length) { el.innerHTML = '<div class="empty">비어 있음</div>'; return; }
   el.innerHTML = files.map(name => `
     <div class="item">
-      <img src="/files/${folder}/${encodeURIComponent(name)}" loading="lazy">
+      <img src="/files/${folder}/${encodeURIComponent(name)}" loading="lazy"
+           onclick="openManualEditor('${folder}', '${name.replace(/'/g, "\\'")}')">
       <div class="name" title="${name}">${name}</div>
+      ${folder !== 'output' ? `<button class="link" onclick="openManualEditor('${folder}', '${name.replace(/'/g, "\\'")}')">직접선택</button>` : ''}
       ${folder === 'output' ? `<a class="dl" href="/files/${folder}/${encodeURIComponent(name)}" download>저장</a>` : ''}
       <button class="del" title="삭제" onclick="deleteFile('${folder}', '${name.replace(/'/g, "\\'")}')">×</button>
     </div>
@@ -260,6 +364,94 @@ async function refresh() {
 
 refresh();
 setInterval(refresh, 3000);
+
+// ---- Manual brush editor ----
+const BRUSH_RADIUS = 16; // fixed on-screen radius in canvas pixels — not user-adjustable, per request
+const modalOverlay = document.getElementById('modalOverlay');
+const modalImg = document.getElementById('modalImg');
+const baseCanvas = document.getElementById('baseCanvas');
+const maskCanvas = document.getElementById('maskCanvas');
+const canvasWrap = document.getElementById('canvasWrap');
+const baseCtx = baseCanvas.getContext('2d');
+const maskCtx = maskCanvas.getContext('2d');
+let currentFolder = null, currentFilename = null, painting = false;
+
+function openManualEditor(folder, filename) {
+  currentFolder = folder;
+  currentFilename = filename;
+  const img = new Image();
+  img.onload = () => {
+    const maxW = Math.min(820, window.innerWidth * 0.86);
+    const maxH = window.innerHeight * 0.62;
+    const scale = Math.min(maxW / img.width, maxH / img.height, 1);
+    const dw = Math.round(img.width * scale), dh = Math.round(img.height * scale);
+    [modalImg, baseCanvas, maskCanvas].forEach(el => { el.width = dw; el.height = dh; });
+    modalImg.style.width = dw + 'px'; modalImg.style.height = dh + 'px';
+    canvasWrap.style.width = dw + 'px'; canvasWrap.style.height = dh + 'px';
+    baseCtx.drawImage(img, 0, 0, dw, dh);
+    maskCtx.clearRect(0, 0, dw, dh);
+    modalOverlay.classList.add('open');
+  };
+  img.src = `/files/${folder}/${encodeURIComponent(filename)}`;
+}
+
+function maskPos(evt) {
+  const rect = maskCanvas.getBoundingClientRect();
+  const scaleX = maskCanvas.width / rect.width, scaleY = maskCanvas.height / rect.height;
+  return { x: (evt.clientX - rect.left) * scaleX, y: (evt.clientY - rect.top) * scaleY };
+}
+
+function paintAt(x, y) {
+  maskCtx.fillStyle = 'rgba(255,60,60,0.55)';
+  maskCtx.beginPath();
+  maskCtx.arc(x, y, BRUSH_RADIUS, 0, Math.PI * 2);
+  maskCtx.fill();
+}
+
+maskCanvas.addEventListener('mousedown', e => { painting = true; const p = maskPos(e); paintAt(p.x, p.y); });
+maskCanvas.addEventListener('mousemove', e => { if (painting) { const p = maskPos(e); paintAt(p.x, p.y); } });
+window.addEventListener('mouseup', () => { painting = false; });
+
+document.getElementById('clearMaskBtn').addEventListener('click', () => {
+  maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+});
+document.getElementById('cancelModalBtn').addEventListener('click', () => {
+  modalOverlay.classList.remove('open');
+});
+
+document.getElementById('applyMaskBtn').addEventListener('click', async () => {
+  // build a plain black/white mask (white = erase) at the same size as the display canvas;
+  // the server scales it up to the original image resolution.
+  const w = maskCanvas.width, h = maskCanvas.height;
+  const src = maskCtx.getImageData(0, 0, w, h).data;
+  const out = document.createElement('canvas');
+  out.width = w; out.height = h;
+  const outCtx = out.getContext('2d');
+  const outData = outCtx.createImageData(w, h);
+  for (let i = 0; i < src.length; i += 4) {
+    const painted = src[i + 3] > 0 ? 255 : 0;
+    outData.data[i] = outData.data[i + 1] = outData.data[i + 2] = painted;
+    outData.data[i + 3] = 255;
+  }
+  outCtx.putImageData(outData, 0, 0);
+  const maskDataUrl = out.toDataURL('image/png');
+
+  const btn = document.getElementById('applyMaskBtn');
+  btn.disabled = true;
+  statusText.textContent = '직접 선택한 영역 지우는 중...';
+  try {
+    const res = await fetch('/api/manual_process', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folder: currentFolder, filename: currentFilename, mask: maskDataUrl }),
+    });
+    const result = await res.json();
+    statusText.textContent = result.error ? `실패: ${result.error}` : `완료: ${result.saved}`;
+    modalOverlay.classList.remove('open');
+    refresh();
+  } finally {
+    btn.disabled = false;
+  }
+});
 </script>
 </body>
 </html>
