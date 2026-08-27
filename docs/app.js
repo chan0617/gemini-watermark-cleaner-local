@@ -131,6 +131,7 @@ async function processOne(item) {
 // unreliable part, or a quick way to test whether the erase/fill step
 // works independent of where the box comes from.
 async function applyFixedPosition(item) {
+  if (item.status === "processing") return; // ignore repeat clicks while already running
   item.status = "processing";
   render();
   try {
@@ -251,14 +252,16 @@ function renderList(folder, list) {
         img.src = c.toDataURL();
       });
     }
-    img.title = item.status === "processing" ? "처리 중..." : "";
+    const isProcessing = item.status === "processing";
+    if (isProcessing) div.classList.add("processing");
+    img.title = isProcessing ? "처리 중..." : "";
     img.onclick = () => openManualEditor(item);
     div.appendChild(img);
 
     const name = document.createElement("div");
     name.className = "name";
-    if (item.status === "processing") {
-      name.textContent = `${item.name} (처리 중...)`;
+    if (isProcessing) {
+      name.textContent = `⏳ ${item.name} — 처리 중... (최초 실행 시 모델 다운로드 포함 1분 이상 걸릴 수 있습니다)`;
       name.title = item.name;
     } else if (item.status === "failed" && item.error) {
       name.textContent = `${item.name} — ${item.error}`;
@@ -273,12 +276,14 @@ function renderList(folder, list) {
       const manualBtn = document.createElement("button");
       manualBtn.className = "link";
       manualBtn.textContent = "직접선택";
+      manualBtn.disabled = isProcessing;
       manualBtn.onclick = () => openManualEditor(item);
       div.appendChild(manualBtn);
 
       const fixedBtn = document.createElement("button");
       fixedBtn.className = "link";
-      fixedBtn.textContent = "고정위치";
+      fixedBtn.textContent = isProcessing ? "처리 중..." : "고정위치";
+      fixedBtn.disabled = isProcessing;
       fixedBtn.title = "탐지를 건너뛰고 우측 하단 예상 위치를 바로 지웁니다";
       fixedBtn.onclick = () => applyFixedPosition(item);
       div.appendChild(fixedBtn);

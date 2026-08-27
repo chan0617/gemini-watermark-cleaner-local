@@ -30,8 +30,11 @@ button.primary:disabled, button.secondary:disabled { opacity: 0.5; cursor: defau
 .col h2 span.count { color: #6e6e73; font-weight: normal; }
 .item { display: flex; align-items: center; gap: 6px; padding: 6px; border-radius: 8px; }
 .item:hover { background: #f5f5f7; }
+.item.processing { background: #fff8e1; }
+.item.processing .name { white-space: normal; color: #8a6d00; font-weight: 500; }
 .item img { width: 40px; height: 40px; object-fit: cover; border-radius: 6px; background: #eee; cursor: pointer; }
 .item .name { flex: 1; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item button.link:disabled { color: #b0b0b5; cursor: default; }
 .item button.link {
   font-size: 12px; color: #0071e3; background: none; border: none; cursor: pointer; padding: 0; margin-right: 2px;
 }
