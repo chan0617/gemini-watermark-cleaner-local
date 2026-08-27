@@ -289,3 +289,22 @@ async function detectWatermark(imageData) {
 
   return null;
 }
+
+/**
+ * The watermark's expected box from geometry alone, with no confidence
+ * scoring or image content analysis at all — bypasses detection entirely.
+ * Useful when the confidence-based search is being unreliable: the
+ * watermark is corner-anchored and its position is fairly consistent
+ * within a resolution class, so this is often "good enough" even without
+ * verifying anything is actually there.
+ */
+function getDefaultAnchorBox(width, height) {
+  const minDim = Math.min(width, height);
+  const isLargeTier = minDim > 1536;
+  const { margin } = isLargeTier ? ANCHORS[0] : ANCHORS[1];
+  const sizeFraction = isLargeTier ? 0.03 : 0.08;
+  const size = Math.max(8, Math.round(minDim * sizeFraction));
+  const x2 = width - Math.round(minDim * margin);
+  const y2 = height - Math.round(minDim * margin);
+  return [x2 - size, y2 - size, x2, y2];
+}

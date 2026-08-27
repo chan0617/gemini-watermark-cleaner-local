@@ -126,6 +126,38 @@ async function processOne(item) {
   render();
 }
 
+// Skips confidence-based detection entirely and erases the geometrically
+// expected corner position — a fallback for when detection itself is the
+// unreliable part, or a quick way to test whether the erase/fill step
+// works independent of where the box comes from.
+async function applyFixedPosition(item) {
+  item.status = "processing";
+  render();
+  try {
+    if (!item.bitmap) item.bitmap = await loadBitmapFromFile(item.file);
+    const bitmap = item.bitmap;
+    const box = getDefaultAnchorBox(bitmap.width, bitmap.height);
+
+    const sess = await ensureSession();
+    const destCanvas = document.createElement("canvas");
+    destCanvas.width = bitmap.width; destCanvas.height = bitmap.height;
+    destCanvas.getContext("2d").drawImage(bitmap, 0, 0);
+
+    const maskCanvas = await buildMaskCanvasFromBox(bitmap.width, bitmap.height, box, 10);
+    await inpaintModule.inpaintRegion(sess, bitmap, destCanvas, box, maskCanvas);
+
+    item.resultCanvas = destCanvas;
+    item.confidence = null;
+    item.status = "done";
+    item.error = null;
+  } catch (err) {
+    console.error(err);
+    item.status = "failed";
+    item.error = `오류: ${err.message || err}`;
+  }
+  render();
+}
+
 processBtn.addEventListener("click", async () => {
   processBtn.disabled = true;
   const pending = items.filter((it) => it.status === "pending" || it.status === "failed");
@@ -243,6 +275,13 @@ function renderList(folder, list) {
       manualBtn.textContent = "직접선택";
       manualBtn.onclick = () => openManualEditor(item);
       div.appendChild(manualBtn);
+
+      const fixedBtn = document.createElement("button");
+      fixedBtn.className = "link";
+      fixedBtn.textContent = "고정위치";
+      fixedBtn.title = "탐지를 건너뛰고 우측 하단 예상 위치를 바로 지웁니다";
+      fixedBtn.onclick = () => applyFixedPosition(item);
+      div.appendChild(fixedBtn);
     }
     if (folder === "output") {
       const dl = document.createElement("button");
