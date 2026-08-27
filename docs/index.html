@@ -7,6 +7,26 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <div id="errorBanner" style="display:none; background:#ffe5e5; border:2px solid #ff3b30; color:#8a0000; padding:14px; margin-bottom:16px; border-radius:8px; font-size:13px; white-space:pre-wrap; word-break:break-all;"></div>
+  <script>
+    // Surfaces any JS error directly on the page — no DevTools needed to
+    // diagnose. Placed before the other scripts so it also catches
+    // failures in loading them (e.g. an ad-blocker blocking a CDN script).
+    (function () {
+      var banner = document.getElementById('errorBanner');
+      function show(text) {
+        banner.style.display = 'block';
+        banner.textContent += (banner.textContent ? '\n\n' : '') + text;
+      }
+      window.addEventListener('error', function (e) {
+        show('오류 발생: ' + e.message + '\n위치: ' + (e.filename || '?') + ':' + (e.lineno || '?'));
+      });
+      window.addEventListener('unhandledrejection', function (e) {
+        var reason = e.reason && e.reason.message ? e.reason.message : String(e.reason);
+        show('처리되지 않은 오류(Promise): ' + reason);
+      });
+    })();
+  </script>
   <h1>Gemini Watermark Cleaner</h1>
   <div class="sub">
     브라우저 안에서만 처리됩니다 — 이미지가 어디로도 업로드되지 않습니다.
@@ -71,8 +91,8 @@
     detector.js/inpaint.js/app.js so the URL itself changes and the browser
     is forced to fetch fresh code.
   -->
-  <script src="detector.js?v=5"></script>
-  <script src="inpaint.js?v=5"></script>
-  <script src="app.js?v=5"></script>
+  <script src="detector.js?v=6"></script>
+  <script src="inpaint.js?v=6"></script>
+  <script src="app.js?v=6"></script>
 </body>
 </html>
