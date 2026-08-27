@@ -77,8 +77,9 @@
   </div>
 
   <p class="footer">
-    모델: <a href="https://huggingface.co/Carve/LaMa-ONNX" target="_blank">Carve/LaMa-ONNX</a>
-    (Apache-2.0, <a href="https://github.com/advimman/lama" target="_blank">advimman/lama</a> 기반) ·
+    방식: 역알파블렌딩(수학적 복원, AI 모델 불필요) ·
+    알파맵 출처: <a href="https://github.com/PlayerYK/GeminiWatermarkRemover" target="_blank">PlayerYK/GeminiWatermarkRemover</a> (MIT) ·
+    직접선택 보정용 모델: <a href="https://huggingface.co/Carve/LaMa-ONNX" target="_blank">Carve/LaMa-ONNX</a> (Apache-2.0) ·
     코드: <a href="https://github.com/chan0617/gemini-watermark-cleaner-local" target="_blank">GitHub</a>
   </p>
 
@@ -88,11 +89,11 @@
     GitHub Pages doesn't send strong no-cache headers on these files, so a
     browser can keep serving a stale cached copy after a redeploy even past
     a hard refresh. Bump this version string on every deploy that touches
-    detector.js/inpaint.js/app.js so the URL itself changes and the browser
-    is forced to fetch fresh code.
+    reversealpha.js/inpaint.js/app.js so the URL itself changes and the
+    browser is forced to fetch fresh code.
   -->
-  <script src="detector.js?v=7"></script>
-  <script src="inpaint.js?v=7"></script>
-  <script src="app.js?v=7"></script>
+  <script src="reversealpha.js?v=8"></script>
+  <script src="inpaint.js?v=8"></script>
+  <script src="app.js?v=8"></script>
 </body>
 </html>
